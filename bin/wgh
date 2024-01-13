@@ -1,0 +1,100 @@
+#!/usr/bin/env ruby
+
+# Add lib directory to load path
+lib = File.expand_path(File.dirname(__FILE__) + '/../lib')
+$LOAD_PATH.unshift(lib) if File.directory?(lib) && !$LOAD_PATH.include?(lib)
+
+#require "bundler/setup"
+require "yaml"
+require "optparse"
+require "wgh"
+
+options = Wgh::DEFAULT_OPTIONS.dup
+
+
+CONF = YAML.load IO.read File.expand_path options[:config]
+CONF.merge! options
+LOG ||= Goredar::Logger.new STDERR
+LOG.level = Logger::INFO
+
+op = OptionParser.new do |opts|
+  opts.banner = "Usage: wgh [options] [HOST_NAME]"
+
+  %w[hostname dc project owner responsible status].each do |option|
+    instance_eval %Q[
+      opts.on("-#{option[0]}", "--#{option} #{option.upcase}", "find/filter by #{option}") do |#{option}|
+        options[:selectors]["#{option}"] = #{option}.split(',')
+      end
+    ]
+  end
+
+  %w[details role].each do |option|
+    instance_eval %Q[
+      opts.on("-#{option[0].upcase}", "--#{option} #{option.upcase}", "find/filter by #{option}") do |#{option}|
+        options[:selectors]["#{option}"] = #{option}.split(',')
+      end
+    ]
+  end
+
+  opts.on("-u", "--update", "update database") { Wgh.update; exit 0 }
+  opts.on("-a", "--app SELECTOR", "Find apps by selector (format is app:realm:game)") { |selector| options[:selectors][:app] = selector }
+  opts.on("-n", "--dns DNS", "Find apps by DNS name") { |dns| options[:selectors][:dns] = dns }
+  #opts.on("-c", "--clusters", "use clusters db for query") { options[:db] = :clusters }
+  opts.on("-z", "--fuzzy", "fuzzy search (regexp support)") { options[:fuzzy] = true }
+  opts.on("-f", "--full", "show full information (more columns)") { options[:full] = true }
+
+  opts.on("-j", "--jira", "format output for use with jira (table)") { options[:output] = :jira }
+  opts.on("-t", "--table", "force table output (useful in pipes)") { options[:output] = :table }
+  opts.on("--json", "json output format") { options[:output] = :json }
+
+  opts.on("--debug", "set log level to debug severity") { LOG.level = Logger::DEBUG }
+  opts.on("-v", "--version", "Show version") { puts "#{options[:self_name]}: #{Wgh::VERSION}"; exit }
+  opts.on_tail("--help", "Show this message") { puts opts; exit }
+end
+
+begin
+  op.parse!
+rescue SystemExit
+  exit 0
+rescue Exception => e
+  LOG.error "[app] #{e.message}"
+  puts op
+  exit 1
+end
+
+args = $stdin.tty? ? ARGV : ARGV + $stdin.readlines
+unless args.empty?
+  require "oj"
+  args.each do |line|
+    line = line.chomp
+    next if line.empty?
+    begin
+      json_entry = Oj.load(line)
+      if json_entry.include? "triggerid"
+        options[:triggers] << json_entry
+      else
+        options[:records][:servers] ||= []
+        options[:records][:servers] << json_entry
+      end
+    rescue
+      options[:selectors]["hostname"] ||= []
+      options[:selectors]["hostname"] << line
+    end
+  end
+end
+
+unless options[:triggers].empty?
+  options[:selectors]["hostname"] ||= []
+  options[:selectors]["hostname"] += options[:triggers].map { |trigger| trigger["host"] }
+  options[:selectors]["hostname"].uniq!
+end
+
+LOG.debug "[app] selectors: #{options[:selectors]}"
+
+if options[:records] && options[:records][:servers] && !options[:records][:servers].empty?
+  $stdout.puts Wgh.view options
+elsif options[:selectors] && !options[:selectors].empty?
+  $stdout.puts Wgh.view Wgh.find options
+else
+  $stdout.puts
+end
